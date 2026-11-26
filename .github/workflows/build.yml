@@ -23,6 +23,11 @@ env:
   SKUS: "6111 6411 6611 6711 6811 6911"
   EXPECTED_DEVICES: "6" # prepare.sh fails if .config does not enable exactly this many profiles
   KEEP_RELEASES: "7"
+  # INF-3 pins. Empty = float (today's behaviour). Use full SHAs; see scripts/prepare.sh.
+  OPENWRT_SHA: ""
+  PR_SHA: ""
+  IWINFO_PATCH_SHA256: "" # "<pr>=<sha256> ..."
+  FEEDS_CONF: "" # path in this repo, e.g. a release's feeds.buildinfo
 
 jobs:
   check:
@@ -40,10 +45,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force }}
         run: |
-          up=$(git ls-remote "$OPENWRT_REPO" "refs/heads/$OPENWRT_BRANCH" | cut -f1)
+          up=${OPENWRT_SHA:-$(git ls-remote "$OPENWRT_REPO" "refs/heads/$OPENWRT_BRANCH" | cut -f1)}
           pr=""
           if [ -n "$PR_NUMBER" ]; then
-            pr=$(git ls-remote "$OPENWRT_REPO" "refs/pull/$PR_NUMBER/head" | cut -f1)
+            pr=${PR_SHA:-$(git ls-remote "$OPENWRT_REPO" "refs/pull/$PR_NUMBER/head" | cut -f1)}
           fi
           iw=""
           for n in $IWINFO_PRS; do
@@ -104,6 +109,29 @@ jobs:
     - name: Build
       working-directory: openwrt
       run: make -j"$(($(nproc) + 1))" || make -j1 V=s
+
+    - name: Validate images (INF-4)
+      run: |
+        # Fails the build, and so the release, if any SKU's sysupgrade image is missing or is not
+        # the image for that SKU (board, DTB model/compatible, calibration variant, FEAT-14 q6_region).
+        set -o pipefail
+        d=openwrt/bin/targets/$TARGET/$SUBTARGET
+        mkdir -p validate
+        : > validate/validate-image.txt
+        fail=0
+        for sku in $SKUS; do
+          img=$(find "$d" -maxdepth 1 -name "*-jidu${sku}-squashfs-sysupgrade.bin" | head -n1)
+          echo "== jidu$sku: ${img:-MISSING}" | tee -a validate/validate-image.txt
+          if [ -z "$img" ]; then fail=1; continue; fi
+          python3 -I scripts/validate-image.py "$img" "$sku" 2>&1 | tee -a validate/validate-image.txt \
+            || fail=1
+          python3 -I scripts/validate-image.py "$img" "$sku" --json \
+            > "validate/validate-image-jidu$sku.json" || true
+        done
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::image validation failed; see the log above"
+          exit 1
+        fi
 
     - name: Save caches
       if: always()
@@ -182,6 +210,10 @@ jobs:
         find "$d" -maxdepth 1 -type f \
           \( -name '*sysupgrade*' -o -name '*initramfs*' \) \
           -exec cp {} out/ \;
+        # INF-5: the build record next to the images
+        cp "$d"/*.manifest "$d"/config.buildinfo "$d"/feeds.buildinfo "$d"/version.buildinfo out/
+        cp inputs.json validate/validate-image.txt out/
+        tar -C validate -czf out/validate-image-json.tar.gz $(cd validate && ls validate-image-jidu*.json)
         ls -lh out
 
     - name: Publish release

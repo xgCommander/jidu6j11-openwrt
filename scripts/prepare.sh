@@ -22,10 +22,11 @@ OPENWRT_SHA="${OPENWRT_SHA:-}"
 PIN_PR_SHA="${PR_SHA:-}"
 IWINFO_PATCH_SHA256="${IWINFO_PATCH_SHA256:-}"
 FEEDS_CONF="${FEEDS_CONF:-}"
-if [ -n "$FEEDS_CONF" ]; then
-  FEEDS_CONF="$(cd "$(dirname "$FEEDS_CONF")" && pwd)/$(basename "$FEEDS_CONF")"
-  [ -f "$FEEDS_CONF" ] || { echo "::error::FEEDS_CONF file not found: $FEEDS_CONF"; exit 1; }
-fi
+abs_file() { # absolute path of an existing file, since the script later cd's into openwrt/
+  [ -f "$2" ] || { echo "::error::$1 file not found: $2" >&2; exit 1; }
+  echo "$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+}
+if [ -n "$FEEDS_CONF" ]; then FEEDS_CONF="$(abs_file FEEDS_CONF "$FEEDS_CONF")"; fi
 TARGET="${TARGET:-qualcommbe}"
 SUBTARGET="${SUBTARGET:-ipq95xx}"
 
