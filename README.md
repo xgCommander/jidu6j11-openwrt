@@ -54,6 +54,8 @@ GitHub also adds a "Source code" archive to every release. It only holds this re
 - **No open Wi-Fi on first boot.** After a fresh install (or `sysupgrade -n`) no Wi-Fi network is broadcast and the root password is empty. Connect a cable to a LAN port, open LuCI at http://192.168.1.1, set a root password, then under Network > Wireless set the country where the router is used and a WPA2/WPA3 key, and enable the network. Upgrading with kept settings from an older image of this build keeps its Wi-Fi configuration: if that still broadcasts an open `OpenWrt` network, set a key or disable it.
 - **Extra packages.** USB storage and network support, common filesystems, VPN and traffic-shaping tools, a few LuCI apps and handy command-line tools are built into the image. The current list is in [`config/extra-packages.txt`](config/extra-packages.txt). Kernel modules that aren't in the image can't be installed later, because there is no package feed for these builds yet.
 
+Install, upgrade and recovery notes for the JIDU6911 are in [docs/jidu6911.md](docs/jidu6911.md).
+
 ## How the builds work
 
 - The workflow ([`.github/workflows/build.yml`](.github/workflows/build.yml)) runs daily at 02:00 IST (20:30 UTC) and can also be started by hand from the Actions tab. Tick "Build even if nothing changed" to force a build.
