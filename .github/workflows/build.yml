@@ -7,8 +7,7 @@ on:
         description: "Build even if nothing changed"
         type: boolean
         default: false
-  schedule:
-    - cron: "30 20 * * *" # 02:00 IST, daily
+  # schedule removed on the xgCommander fork: builds run only by manual dispatch
 
 permissions:
   contents: write
