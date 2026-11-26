@@ -28,6 +28,9 @@ env:
   PR_SHA: ""
   IWINFO_PATCH_SHA256: "" # "<pr>=<sha256> ..."
   FEEDS_CONF: "" # path in this repo, e.g. a release's feeds.buildinfo
+  # INF-2 signed apk feed: OFF unless the repository variable APK_FEED is "true".
+  # Turning it on also needs secret APK_SIGN_KEY, keys/apk-feed.pub.pem and Pages (source: Actions).
+  APK_FEED: ${{ vars.APK_FEED == 'true' && 'true' || 'false' }}
 
 jobs:
   check:
@@ -35,6 +38,7 @@ jobs:
     outputs:
       build: ${{ steps.check.outputs.build }}
       hash: ${{ steps.check.outputs.hash }}
+      feed_id: ${{ steps.check.outputs.feed_id }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -54,8 +58,10 @@ jobs:
           for n in $IWINFO_PRS; do
             iw="$iw $(git ls-remote https://github.com/openwrt/iwinfo "refs/pull/$n/head" | cut -f1)"
           done
-          own=$(git ls-tree -r HEAD -- config patches tree files bdf feeds.conf.default.d scripts | sha256sum | cut -d' ' -f1)
-          hash=$(echo "$up $pr $iw $own" | sha256sum | cut -c1-16)
+          own=$(git ls-tree -r HEAD -- config patches tree files bdf feeds.conf.default.d scripts keys | sha256sum | cut -d' ' -f1)
+          feed=""
+          if [ "$APK_FEED" = "true" ]; then feed=" apk-feed"; fi # empty when off: hash as before
+          hash=$(echo "$up $pr $iw $own$feed" | sha256sum | cut -c1-16)
 
           last=$(gh release view --json body -q .body 2>/dev/null | grep -oP 'Build-Hash: \K\w+' || true)
           echo "current=$hash last=$last"
@@ -66,6 +72,8 @@ jobs:
             echo "build=false" >> "$GITHUB_OUTPUT"
           fi
           echo "hash=$hash" >> "$GITHUB_OUTPUT"
+          # INF-2: unique per run, so a same-day rebuild never reuses another image's feed URL
+          echo "feed_id=snapshot-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: check
@@ -99,8 +107,54 @@ jobs:
         key: build-cache-${{ github.run_id }}
         restore-keys: build-cache-
 
+    # ---- INF-2 (OFF by default): signed per-build apk feed ------------------------------
+    - name: "Feed: config (APK_FEED only)"
+      if: env.APK_FEED == 'true'
+      env:
+        FEED_ID: ${{ needs.check.outputs.feed_id }}
+      run: |
+        owner="${GITHUB_REPOSITORY_OWNER,,}"; repo="${GITHUB_REPOSITORY#*/}"
+        base="https://${owner}.github.io/${repo}/feeds/${FEED_ID}"
+        # VERSION_REPO is %U in /etc/apk/repositories.d/distfeeds.list, so every image points
+        # at the feed built in the same run. ALL_KMODS builds every target kmod for the feed.
+        # VERSIONOPT also activates CONFIG_VERSION_DIST from prepare.sh ("OpenWrt (unofficial)"),
+        # whose parentheses break the image file names; keep the name and file names of a
+        # feed-off build.
+        cat > "$RUNNER_TEMP/feed.config" <<EOF
+        CONFIG_IMAGEOPT=y
+        CONFIG_VERSIONOPT=y
+        CONFIG_VERSION_REPO="$base"
+        CONFIG_SIGNED_PACKAGES=y
+        CONFIG_ALL_KMODS=y
+        CONFIG_VERSION_DIST="OpenWrt"
+        # CONFIG_VERSION_FILENAMES is not set
+        # CONFIG_VERSION_CODE_FILENAMES is not set
+        EOF
+        cat "$RUNNER_TEMP/feed.config"
+        echo "CONFIG_APPEND=$RUNNER_TEMP/feed.config" >> "$GITHUB_ENV"
+
     - name: Prepare tree
       run: bash scripts/prepare.sh
+
+    - name: "Feed: install signing key (APK_FEED only)"
+      if: env.APK_FEED == 'true'
+      env:
+        APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
+      run: |
+        if [ -z "$APK_SIGN_KEY" ]; then
+          echo "::error::APK_FEED is on but secret APK_SIGN_KEY is not set"; exit 1
+        fi
+        if [ ! -f keys/apk-feed.pub.pem ]; then
+          echo "::error::APK_FEED is on but keys/apk-feed.pub.pem is not committed"; exit 1
+        fi
+        # OpenWrt signs packages.adb (and each .apk) with $(TOPDIR)/private-key.pem, an ECDSA
+        # prime256v1 key; base-files installs the matching public-key.pem into /etc/apk/keys/.
+        # Without this file make generates a throwaway key for every build.
+        ( umask 077; printf '%s\n' "$APK_SIGN_KEY" > openwrt/private-key.pem )
+        openssl ec -in openwrt/private-key.pem -pubout -out openwrt/public-key.pem 2>/dev/null
+        if ! cmp -s openwrt/public-key.pem keys/apk-feed.pub.pem; then
+          echo "::error::APK_SIGN_KEY does not match keys/apk-feed.pub.pem"; exit 1
+        fi
 
     - name: Download sources
       working-directory: openwrt
@@ -109,6 +163,10 @@ jobs:
     - name: Build
       working-directory: openwrt
       run: make -j"$(($(nproc) + 1))" || make -j1 V=s
+
+    - name: "Feed: remove signing key (APK_FEED only)"
+      if: always() && env.APK_FEED == 'true'
+      run: rm -f openwrt/private-key.pem
 
     - name: Validate images (INF-4)
       run: |
@@ -216,6 +274,23 @@ jobs:
         tar -C validate -czf out/validate-image-json.tar.gz $(cd validate && ls validate-image-jidu*.json)
         ls -lh out
 
+    - name: "Feed: stage (APK_FEED only)"
+      if: env.APK_FEED == 'true'
+      env:
+        FEED_ID: ${{ needs.check.outputs.feed_id }}
+      run: |
+        # Same layout as downloads.openwrt.org, so distfeeds.list (%U/targets/%S/packages,
+        # %U/packages/%A/<feed>) resolves under feeds/<FEED_ID>/ on Pages.
+        f="feed/$FEED_ID"
+        mkdir -p "$f/targets/$TARGET/$SUBTARGET"
+        cp -a "openwrt/bin/targets/$TARGET/$SUBTARGET/packages" "$f/targets/$TARGET/$SUBTARGET/"
+        cp -a openwrt/bin/packages "$f/"
+        find "$f" -name packages.adb | sort
+        test -f "$f/targets/$TARGET/$SUBTARGET/packages/packages.adb"
+        cp keys/apk-feed.pub.pem out/apk-feed.pub.pem
+        tar -C feed -czf "out/feed-$FEED_ID.tar.gz" "$FEED_ID"
+        du -sh feed "out/feed-$FEED_ID.tar.gz"
+
     - name: Publish release
       env:
         GH_TOKEN: ${{ github.token }}
@@ -233,3 +308,54 @@ jobs:
         gh release list --limit 100 --json tagName -q '.[].tagName' \
           | grep '^snapshot-' | sort -r | tail -n +"$((KEEP_RELEASES + 1))" \
           | xargs -r -I{} gh release delete {} --yes --cleanup-tag
+
+  # INF-2 (OFF by default): publish the feeds of the releases that still exist to GitHub Pages.
+  # Rebuilt from release assets every run, so feed retention follows KEEP_RELEASES exactly.
+  # Needs Pages enabled with source "GitHub Actions" (a repository setting only the human changes).
+  feed-pages:
+    needs: [check, build]
+    if: vars.APK_FEED == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Assemble the feeds of kept releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p site/feeds dl
+          gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName' \
+            | grep '^snapshot-' | sort -r | head -n "$KEEP_RELEASES" > tags.txt
+          while read -r tag; do
+            gh release download "$tag" -R "$GITHUB_REPOSITORY" --pattern 'feed-*.tar.gz' \
+              --dir "dl/$tag" || continue
+            for t in "dl/$tag"/feed-*.tar.gz; do
+              # our own artifacts, but still refuse absolute or parent paths
+              if tar -tzf "$t" | grep -qE '^/|(^|/)\.\.(/|$)'; then
+                echo "::error::unsafe path in $t"; exit 1
+              fi
+              tar -xzf "$t" --no-same-owner -C site/feeds
+            done
+          done < tags.txt
+          { echo '<!doctype html><meta charset="utf-8"><title>apk feeds</title><h1>apk feeds</h1><ul>'
+            for d in site/feeds/*/; do echo "<li>$(basename "$d")</li>"; done
+            echo '</ul>'; } > site/index.html
+          touch site/.nojekyll
+          kb=$(du -sk site | cut -f1)
+          echo "site size: ${kb} KB"
+          # GitHub Pages: published sites may be no larger than 1 GB
+          if [ "$kb" -gt 1000000 ]; then
+            echo "::error::site is ${kb} KB, over the 1 GB Pages limit; lower KEEP_RELEASES"; exit 1
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

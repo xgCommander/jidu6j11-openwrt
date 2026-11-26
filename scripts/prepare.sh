@@ -8,6 +8,7 @@
 #   IWINFO_PATCH_SHA256  space-separated "<pr>=<sha256>"; fail if a downloaded iwinfo patch differs
 #   FEEDS_CONF           feeds.conf to use instead of feeds.conf.default + feeds.conf.default.d,
 #                        e.g. a release's feeds.buildinfo (every feed pinned with ^<commit>)
+#   CONFIG_APPEND        file of extra .config lines, appended before `make defconfig`
 # Writes build-info.env and inputs.json (the record of every input) to the repo root.
 set -euo pipefail
 
@@ -22,11 +23,13 @@ OPENWRT_SHA="${OPENWRT_SHA:-}"
 PIN_PR_SHA="${PR_SHA:-}"
 IWINFO_PATCH_SHA256="${IWINFO_PATCH_SHA256:-}"
 FEEDS_CONF="${FEEDS_CONF:-}"
+CONFIG_APPEND="${CONFIG_APPEND:-}"
 abs_file() { # absolute path of an existing file, since the script later cd's into openwrt/
   [ -f "$2" ] || { echo "::error::$1 file not found: $2" >&2; exit 1; }
   echo "$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 }
 if [ -n "$FEEDS_CONF" ]; then FEEDS_CONF="$(abs_file FEEDS_CONF "$FEEDS_CONF")"; fi
+if [ -n "$CONFIG_APPEND" ]; then CONFIG_APPEND="$(abs_file CONFIG_APPEND "$CONFIG_APPEND")"; fi
 TARGET="${TARGET:-qualcommbe}"
 SUBTARGET="${SUBTARGET:-ipq95xx}"
 
@@ -175,6 +178,12 @@ cat >> .config <<'EOF'
 CONFIG_CCACHE=y
 CONFIG_VERSION_DIST="OpenWrt (unofficial)"
 EOF
+
+# Optional extra Kconfig lines (e.g. the INF-2 package-feed options); unset = nothing added
+if [ -n "$CONFIG_APPEND" ]; then
+  echo "Appending $CONFIG_APPEND to .config"
+  cat "$CONFIG_APPEND" >> .config
+fi
 
 make defconfig
 
