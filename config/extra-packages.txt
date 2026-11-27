@@ -66,3 +66,7 @@ ethtool
 ip-full
 zram-swap
 tcpdump-mini                # packet capture for WAN/DHCP/PPPoE/Wi-Fi debugging when no feed is reachable
+# --- Remote access (FEAT-2, human choice 2026-11-25: Tailscale instead of WireGuard userland) ---
+tailscale                   # Tailscale client (tailscaled + tailscale CLI); needs kmod-tun and ca-bundle (listed above)
+# --- Wi-Fi band steering (PERF-8, human choice 2026-11-26) ---
+usteer                      # moves capable clients to the better band/AP via 802.11k/v (needs wpad-mbedtls, in image)
